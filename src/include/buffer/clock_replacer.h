@@ -14,12 +14,22 @@
 
 #include <list>
 #include <mutex>  // NOLINT
+#include <optional>
 #include <vector>
 
 #include "buffer/replacer.h"
 #include "common/config.h"
 
 namespace bustub {
+
+class Slot {
+ private:
+  bool pinned{false};
+
+ public:
+  bool isPinned() { return this->pinned; }
+  void setPinned(bool isPinned) { this->pinned = isPinned; }
+};
 
 /**
  * ClockReplacer implements the clock replacement policy, which approximates the Least Recently Used policy.
@@ -46,7 +56,8 @@ class ClockReplacer : public Replacer {
   size_t Size() override;
 
  private:
-  // TODO(student): implement me!
+  std::vector<std::optional<Slot>> frame;
+  std::uint64_t frame_pointer{0};
 };
 
 }  // namespace bustub
