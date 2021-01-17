@@ -35,6 +35,50 @@ BufferPoolManager::~BufferPoolManager() {
 }
 
 Page *BufferPoolManager::FetchPageImpl(page_id_t page_id) {
+  latch_.lock();
+
+  if (page_table_.find(page_id) != page_table_.end()) {
+    auto page = &pages_[page_table_[page_id]];
+    latch_.unlock();
+    page->RLatch();
+    replacer_->Pin(page->GetPageId());
+    page->pin_count_++;
+    page->RUnlatch();
+    return page;
+  }
+
+  frame_id_t victim;
+
+  if (!free_list_.empty()) {
+    victim = free_list_.back();
+    free_list_.pop_back();
+  } else {
+    replacer_->Victim(&victim);
+  }
+
+  auto page = &pages_[victim];
+  latch_.unlock();
+
+  page->RLatch();
+  if (page->IsDirty()) {
+    disk_manager_->WritePage(page->GetPageId(), page->GetData());
+  }
+  page->RUnlatch();
+
+  page->WLatch();
+  disk_manager_->ReadPage(page_id, page->data_);
+  page->page_id_ = page_id;
+
+  latch_.lock();
+  page_table_[page_id] = victim;
+  replacer_->Pin(victim);
+
+  page->pin_count_++;
+  latch_.unlock();
+
+  page->WUnlatch();
+
+  return page;
   // 1.     Search the page table for the requested page (P).
   // 1.1    If P exists, pin it and return it immediately.
   // 1.2    If P does not exist, find a replacement page (R) from either the free list or the replacer.
@@ -45,9 +89,44 @@ Page *BufferPoolManager::FetchPageImpl(page_id_t page_id) {
   return nullptr;
 }
 
-bool BufferPoolManager::UnpinPageImpl(page_id_t page_id, bool is_dirty) { return false; }
+bool BufferPoolManager::UnpinPageImpl(page_id_t page_id, bool is_dirty) {
+  latch_.lock();
+
+  if (page_table_.find(page_id) != page_table_.end()) {
+    auto page = &pages_[page_table_[page_id]];
+    latch_.unlock();
+
+    bool zeroCount = true;
+
+    page->WLatch();
+
+    page->is_dirty_ = is_dirty;
+    if (page->pin_count_ == 0) {
+      zeroCount = false;
+    } else {
+      replacer_->Pin(page->GetPageId());
+      page->pin_count_--;
+    }
+
+    page->WUnlatch();
+
+    return zeroCount;
+  }
+
+  return false;
+}
 
 bool BufferPoolManager::FlushPageImpl(page_id_t page_id) {
+  latch_.lock();
+
+  if (page_table_.find(page_id) != page_table_.end()) {
+    auto page = &pages_[page_table_[page_id]];
+    latch_.unlock();
+
+    page->RLatch();
+    disk_manager_->WritePage(page->GetPageId(), page->GetData());
+    page->RUnlatch();
+  }
   // Make sure you call DiskManager::WritePage!
   return false;
 }
@@ -66,12 +145,16 @@ bool BufferPoolManager::DeletePageImpl(page_id_t page_id) {
   // 1.   Search the page table for the requested page (P).
   // 1.   If P does not exist, return true.
   // 2.   If P exists, but has a non-zero pin-count, return false. Someone is using the page.
-  // 3.   Otherwise, P can be deleted. Remove P from the page table, reset its metadata and return it to the free list.
+  // 3.   Otherwise, P can be deleted. Remove P from the page table, reset its metadata and return it to the free
+  // list.
   return false;
 }
 
 void BufferPoolManager::FlushAllPagesImpl() {
-  // You can do it!
+  std::lock_guard<std::mutex> _(latch_);
+  for (size_t i = 0; i < pool_size_; i++) {
+    disk_manager_->WritePage(pages_[i].GetPageId(), pages_[i].GetData());
+  }
 }
 
 }  // namespace bustub
